@@ -158,6 +158,7 @@ module Win32
           @root = @service.GetFolder(folder)
         rescue WIN32OLERuntimeError => err
           if force
+            @root = @service.GetFolder("\\")
             @root.CreateFolder(folder)
             @root = @service.GetFolder(folder)
           else
@@ -192,8 +193,35 @@ module Win32
 
     # Returns whether or not the specified task exists.
     #
-    def exists?(task)
-      enum.include?(task)
+    def exists?(full_task_path)
+      path = nil
+      task_name = nil
+
+      # Used the splat operator to put all folder elements into path and leave only the task name`
+      if full_task_path.include?("\\")
+        *path, task_name = full_task_path.split("\\")
+      else
+        task_name = full_task_path
+      end
+
+      folder = path.nil? ? "\\" : path.join("\\")
+
+      begin
+        root = @service.GetFolder(folder)
+      rescue WIN32OLERuntimeError => err
+        return false
+      end
+
+      if root.nil?
+        return false
+      else
+        begin
+          task = root.GetTask(task_name)
+          return task && task.Name == task_name
+        rescue WIN32OLERuntimeError => err
+          return false
+        end
+      end
     end
 
     # Return the sepcified task if exist
@@ -316,7 +344,7 @@ module Win32
           TASK_CREATE_OR_UPDATE,
           user,
           password,
-          TASK_LOGON_PASSWORD
+          password ? TASK_LOGON_PASSWORD : TASK_LOGON_SERVICE_ACCOUNT
         )
       rescue WIN32OLERuntimeError => err
         raise Error, ole_error('RegisterTaskDefinition', err)
@@ -491,16 +519,26 @@ module Win32
     # trigger variable is a hash of options that define when the scheduled
     # job should run.
     #
-    def new_work_item(task, trigger)
+    def new_work_item(task, trigger, userinfo = { user: nil, password: nil })
+      raise TypeError unless userinfo.is_a?(Hash)
       raise TypeError unless task.is_a?(String)
       raise TypeError unless trigger.is_a?(Hash)
+
+      unless userinfo[:user].nil?
+        raise TypeError unless userinfo[:user].is_a?(String)
+        unless SYSTEM_USERS.include?(userinfo[:user])
+          raise TypeError unless userinfo[:password].is_a?(String)
+        end
+      end
 
       taskDefinition = @service.NewTask(0)
       taskDefinition.RegistrationInfo.Description = ''
       taskDefinition.RegistrationInfo.Author = ''
-      taskDefinition.Settings.StartWhenAvailable = true
+      taskDefinition.Settings.StartWhenAvailable = false
       taskDefinition.Settings.Enabled  = true
       taskDefinition.Settings.Hidden = false
+
+
 
       unless trigger.empty?
         raise ArgumentError, 'Unknown trigger type' unless valid_trigger_option(trigger[:trigger_type])
@@ -580,16 +618,16 @@ module Win32
 
       act = taskDefinition.Actions.Create(0)
       act.Path = 'cmd'
-      user = taskDefinition.Principal.UserId
 
+      @password = userinfo[:password]
       begin
         @task = @root.RegisterTaskDefinition(
           task,
           taskDefinition,
           TASK_CREATE_OR_UPDATE,
-          user.empty? ? 'SYSTEM' : user,
-          @password,
-          @password ? TASK_LOGON_PASSWORD : TASK_LOGON_SERVICE_ACCOUNT
+          userinfo[:user].nil? || userinfo[:user].empty? ? 'SYSTEM': userinfo[:user],
+          userinfo[:password],
+          userinfo[:password] ? TASK_LOGON_PASSWORD : TASK_LOGON_SERVICE_ACCOUNT
         )
       rescue WIN32OLERuntimeError => err
         raise Error, ole_error('RegisterTaskDefinition', err)
